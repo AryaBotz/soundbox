@@ -1,0 +1,15 @@
+{
+  "name": "qris-soundbox-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local development backend for an ESP32 QRIS soundbox",
+  "type": "module",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  }
+}
