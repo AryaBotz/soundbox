@@ -1,11 +1,13 @@
 import http from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.js';
 import { EventStore } from './store.js';
 import { isApprovedPaidNotification, toMidtransEvent, verifyMidtransSignature } from './integrations/midtrans.js';
 import { createSonexSpeech } from './integrations/sonex-tts.js';
+import { rupiahToIndonesianWords } from './indonesian-number.js';
 
 const BODY_LIMIT = 16 * 1024;
 
@@ -26,6 +28,10 @@ function sendAudio(response, audio) {
     'x-content-type-options': 'nosniff'
   });
   response.end(audio);
+}
+
+function speechFilePath(config, eventId) {
+  return path.join(path.dirname(config.dataFile), 'speech', `${eventId}.mp3`);
 }
 
 async function readJson(request) {
@@ -139,14 +145,62 @@ export async function handleRequest(request, response, { config, store, synthesi
         amount: body.amount,
         currency: 'IDR',
         receivedAt: new Date().toISOString(),
-        spokenText: `SIMULASI, BUKAN PEMBAYARAN NYATA. ${body.amount} rupiah diterima dalam simulasi.`
+        spokenText: `SIMULASI, BUKAN PEMBAYARAN NYATA. ${rupiahToIndonesianWords(body.amount)} diterima dalam simulasi.`
       };
       const result = await store.enqueue(event, `simulation:${event.paymentReference}`);
+      const audioUrl = `/dev/simulate-payment/${result.event.id}/audio`;
+      let ttsStatus = 'not_generated';
+      if (result.duplicate) {
+        try {
+          await fs.access(speechFilePath(config, result.event.id));
+          ttsStatus = 'ready';
+        } catch {
+          // A previous TTS request may have failed; duplicates never spend quota again.
+        }
+      }
+      if (!result.duplicate && !config.sonexLabsApiKey) {
+        ttsStatus = 'not_configured';
+      } else if (!result.duplicate) {
+        try {
+          if (typeof synthesizeSpeech !== 'function') throw new Error('TTS unavailable');
+          const audio = await synthesizeSpeech(result.event.spokenText);
+          const filePath = speechFilePath(config, result.event.id);
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.writeFile(filePath, audio);
+          ttsStatus = 'ready';
+        } catch (error) {
+          ttsStatus = 'failed';
+          console.error(`Simulation TTS failed: ${error.statusCode ? `HTTP ${error.statusCode}` : 'service unavailable'}`);
+        }
+      }
       return sendJson(response, result.duplicate ? 200 : 201, {
         warning: 'SIMULATION ONLY — NOT A REAL OR VERIFIED PAYMENT',
         duplicate: result.duplicate,
+        tts: {
+          status: ttsStatus,
+          audioUrl
+        },
         event: result.event
       });
+    }
+
+    const simulationAudioMatch = request.method === 'GET' && url.pathname.match(/^\/dev\/simulate-payment\/([0-9a-f-]{36})\/audio$/i);
+    if (simulationAudioMatch) {
+      if (!config.simulatorEnabled || config.nodeEnv === 'production') {
+        return sendJson(response, 404, { error: 'not_found' });
+      }
+      if (!requireKey(request, response, config.simulatorApiKey, 'x-simulator-key')) return;
+      const event = await store.getById(simulationAudioMatch[1]);
+      if (!event?.isSimulated) return sendJson(response, 404, { error: 'simulated_event_not_found' });
+      try {
+        const audio = await fs.readFile(speechFilePath(config, event.id));
+        return sendAudio(response, audio);
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          return sendJson(response, 404, { error: 'audio_not_ready', message: 'Audio was not generated. Check TTS configuration or retry with a new simulation.' });
+        }
+        throw error;
+      }
     }
 
     if (request.method === 'POST' && url.pathname === '/dev/tts-preview') {
@@ -204,7 +258,8 @@ export async function handleRequest(request, response, { config, store, synthesi
 }
 
 export function createServer({ config, store, synthesizeSpeech = createSonexSpeech({
-  apiKey: config.sonexLabsApiKey
+  apiKey: config.sonexLabsApiKey,
+  voiceId: config.sonexLabsVoiceId
 }) }) {
   return http.createServer((request, response) => {
     void handleRequest(request, response, { config, store, synthesizeSpeech });
@@ -220,7 +275,8 @@ async function main() {
     console.log(`QRIS Soundbox backend listening on http://${config.host}:${config.port}`);
     console.log(`Simulator: ${config.simulatorEnabled && config.nodeEnv !== 'production' ? 'enabled (unverified development events only)' : 'disabled'}`);
     console.log(`Midtrans webhook: ${config.midtransWebhookEnabled ? `enabled for payment_type=${config.midtransAllowedPaymentType}` : 'disabled'}`);
-    console.log(`Cloud TTS preview: ${config.sonexLabsApiKey ? 'configured (explicit requests only)' : 'not configured'}`);
+    console.log(`Cloud TTS: ${config.sonexLabsApiKey ? 'configured' : 'not configured'}`);
+    console.log(`Cloud TTS voice: ${config.sonexLabsVoiceId ? 'custom voice selected' : 'provider default'}`);
   });
 }
 

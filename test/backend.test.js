@@ -7,6 +7,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { EventStore } from '../src/store.js';
 import { handleRequest } from '../src/server.js';
+import { integerToIndonesianWords, rupiahToIndonesianWords } from '../src/indonesian-number.js';
 
 const DEVICE_KEY = 'test-device-key';
 const SIMULATOR_KEY = 'test-simulator-key';
@@ -19,6 +20,7 @@ async function setup(t, overrides = {}) {
   await store.init();
   const config = {
     nodeEnv: 'development',
+    dataFile,
     deviceApiKey: DEVICE_KEY,
     simulatorApiKey: SIMULATOR_KEY,
     simulatorEnabled: true,
@@ -94,6 +96,9 @@ test('simulated payment is visibly unverified, idempotent, and can be acknowledg
   assert.equal(first.event.productionEligible, false);
   assert.equal(first.event.eventType, 'payment_simulated');
   assert.match(first.event.spokenText, /SIMULASI, BUKAN PEMBAYARAN NYATA/);
+  assert.match(first.event.spokenText, /Lima belas ribu rupiah/);
+  assert.doesNotMatch(first.event.spokenText, /15000/);
+  assert.equal(first.tts.status, 'not_configured');
 
   const duplicateResponse = await post(invoke, '/dev/simulate-payment', SIMULATOR_KEY, {
     amount: 15000,
@@ -117,6 +122,51 @@ test('simulated payment is visibly unverified, idempotent, and can be acknowledg
 
   const emptyPoll = await invoke('/api/events', { key: DEVICE_KEY });
   assert.deepEqual((await emptyPoll.json()).events, []);
+});
+
+test('Indonesian amounts are written as spoken words', () => {
+  assert.equal(integerToIndonesianWords(0), 'nol');
+  assert.equal(integerToIndonesianWords(11), 'sebelas');
+  assert.equal(integerToIndonesianWords(21), 'dua puluh satu');
+  assert.equal(integerToIndonesianWords(15000), 'lima belas ribu');
+  assert.equal(integerToIndonesianWords(100000000), 'seratus juta');
+  assert.equal(rupiahToIndonesianWords(15000), 'Lima belas ribu rupiah');
+});
+
+test('new simulated payment creates one TTS file and duplicate requests reuse it', async (t) => {
+  const { invoke } = await setup(t, { sonexLabsApiKey: 'test-key' });
+  let calls = 0;
+  let spoken;
+  const synthesizeSpeech = async (text) => {
+    calls += 1;
+    spoken = text;
+    return Buffer.from('fake-payment-mp3');
+  };
+  const request = () => invoke('/dev/simulate-payment', {
+    method: 'POST',
+    key: SIMULATOR_KEY,
+    headerName: 'x-simulator-key',
+    body: { amount: 15000, idempotencyKey: 'tts-payment-1' },
+    synthesizeSpeech
+  });
+
+  const firstResponse = await request();
+  assert.equal(firstResponse.status, 201);
+  const first = await firstResponse.json();
+  assert.equal(calls, 1);
+  assert.match(spoken, /SIMULASI, BUKAN PEMBAYARAN NYATA/);
+  assert.equal(first.tts.status, 'ready');
+
+  const audioResponse = await invoke(first.tts.audioUrl, { key: SIMULATOR_KEY, headerName: 'x-simulator-key' });
+  assert.equal(audioResponse.status, 200);
+  assert.equal(audioResponse.headers['content-type'], 'audio/mpeg');
+  assert.equal(audioResponse.audio.toString(), 'fake-payment-mp3');
+
+  const duplicateResponse = await request();
+  const duplicate = await duplicateResponse.json();
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.tts.status, 'ready');
+  assert.equal(calls, 1);
 });
 
 test('simulator and device endpoints require their configured API keys', async (t) => {
@@ -155,6 +205,7 @@ test('SonexLabs TTS adapter sends Indonesian text and returns MP3 bytes', async 
   let captured;
   const synthesize = createSonexSpeech({
     apiKey: 'secret-for-test',
+    voiceId: 'clone:test-voice-id',
     fetchImpl: async (url, options) => {
       captured = { url, options, body: JSON.parse(options.body) };
       return { ok: true, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer };
@@ -165,6 +216,21 @@ test('SonexLabs TTS adapter sends Indonesian text and returns MP3 bytes', async 
   assert.equal(captured.options.headers.authorization, 'Bearer secret-for-test');
   assert.equal(captured.body.text, 'Halo.');
   assert.equal(captured.body.output_format, 'mp3');
+  assert.equal(captured.body.voice_id, 'clone:test-voice-id');
+});
+
+test('SonexLabs TTS adapter rejects an unknown voice instead of silently using its default', async () => {
+  const { createSonexSpeech } = await import('../src/integrations/sonex-tts.js');
+  const synthesize = createSonexSpeech({
+    apiKey: 'secret-for-test',
+    voiceId: 'clone:missing-voice',
+    fetchImpl: async () => ({
+      ok: true,
+      headers: { get: (name) => name === 'x-voice-fallback' ? 'true' : null },
+      arrayBuffer: async () => new ArrayBuffer(0)
+    })
+  });
+  await assert.rejects(synthesize('Halo.'), /did not recognize SONEXLABS_VOICE_ID/);
 });
 
 test('deduplication and acknowledgements survive reopening the event store', async (t) => {
@@ -245,6 +311,7 @@ test('enabled Midtrans webhook verifies signature, approved method, payment stat
   assert.equal(event.isVerifiedPayment, true);
   assert.equal(event.isSimulated, false);
   assert.equal(event.paymentMethod, 'qris');
+  assert.match(event.spokenText, /Lima belas ribu rupiah/);
 });
 
 test('Midtrans capture with a fraud challenge is not enqueued', async (t) => {

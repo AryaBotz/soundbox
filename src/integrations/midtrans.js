@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { rupiahToIndonesianWords } from '../indonesian-number.js';
 
 export function verifyMidtransSignature(payload, serverKey) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
@@ -42,6 +43,6 @@ export function toMidtransEvent(payload) {
     amount,
     currency: payload.currency ?? 'IDR',
     receivedAt: new Date().toISOString(),
-    spokenText: `Pembayaran QRIS sebesar ${Math.round(amount)} rupiah berhasil.`
+    spokenText: `Pembayaran QRIS sebesar ${rupiahToIndonesianWords(amount)} berhasil.`
   };
 }

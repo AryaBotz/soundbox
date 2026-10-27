@@ -119,6 +119,11 @@ export class EventStore {
     return this.#state.events.filter((event) => event.acknowledgedAt === null).slice(0, limit);
   }
 
+  async getById(id) {
+    await this.#writeChain;
+    return this.#state.events.find((event) => event.id === id) ?? null;
+  }
+
   async acknowledge(id) {
     return this.#mutate((state) => {
       const event = state.events.find((item) => item.id === id);

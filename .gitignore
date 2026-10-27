@@ -2,4 +2,5 @@
 data/*.jsonl
 data/*.tmp
 data/*.mp3
+data/**/*.mp3
 node_modules/

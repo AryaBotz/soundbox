@@ -1,6 +1,6 @@
 # QRIS Soundbox backend
 
-Backend awal untuk development QRIS Soundbox. Saat ini backend punya endpoint pratinjau TTS cloud yang bisa diuji dari Windows; integrasi ESP32 dan MAX98357A I2S menyusul. Backend ini tidak membuat QRIS dan tidak menganggap pembayaran simulasi sebagai pembayaran nyata.
+Backend awal untuk development QRIS Soundbox. Backend dapat membuat pratinjau TTS cloud dari PowerShell dan otomatis menghasilkan ucapan untuk setiap pembayaran simulasi. Integrasi ESP32 dan MAX98357A I2S menyusul. Backend ini tidak membuat QRIS dan tidak menganggap pembayaran simulasi sebagai pembayaran nyata.
 
 ## Kebutuhan
 
@@ -22,7 +22,7 @@ Dari folder proyek ini:
 Copy-Item .env.example .env
 ```
 
-Buka `.env`, lalu ubah `DEVICE_API_KEY` dan `SIMULATOR_API_KEY` menjadi nilai acak lokal. Untuk mengaktifkan TTS cloud, buat akun SonexLabs dan isi `SONEXLABS_API_KEY` pada `.env`. Paket gratisnya mencakup 10.000 karakter dan tidak meminta kartu menurut dokumentasi penyedia. Simpan key hanya di `.env` lokal; jangan kirim ke chat atau commit ke Git. Backend meneruskan teks yang diminta ke layanan cloud TTS. Pertahankan `MIDTRANS_WEBHOOK_ENABLED=false` selama persetujuan GoPay Static QRIS belum ada.
+Buka `.env`, lalu ubah `DEVICE_API_KEY` dan `SIMULATOR_API_KEY` menjadi nilai acak lokal. Untuk mengaktifkan TTS cloud, buat akun SonexLabs dan isi `SONEXLABS_API_KEY` pada `.env`. Paket gratisnya mencakup 10.000 karakter dan satu klon suara menurut dokumentasi penyedia. Simpan API key hanya di `.env` lokal; jangan kirim ke chat atau commit ke Git. `SONEXLABS_VOICE_ID` opsional untuk memilih klon suara; biarkan kosong untuk memakai suara bawaan. Pertahankan `MIDTRANS_WEBHOOK_ENABLED=false` selama persetujuan GoPay Static QRIS belum ada.
 
 Mulai backend:
 
@@ -60,6 +60,19 @@ Invoke-RestMethod -Method Post -Uri 'http://localhost:8787/dev/simulate-payment'
 
 **Simulasi bukan pembayaran nyata.** Respons dan event menandai `isSimulated: true`, `isVerifiedPayment: false`, `productionEligible: false`, serta `eventType: "payment_simulated"`. Teks suaranya juga menyebut “SIMULASI, BUKAN PEMBAYARAN NYATA”. Server mengembalikan 404 untuk endpoint simulasi jika `NODE_ENV=production` atau simulator dinonaktifkan.
 
+Jika `SONEXLABS_API_KEY` terisi, setiap simulasi baru juga membuat MP3 di `data/speech/`. Respons JSON memuat `tts.status` dan `tts.audioUrl`. Duplikat tidak memanggil penyedia TTS lagi sehingga tidak memakai kuota tambahan. Setelah membuat simulasi, unduh dan putar MP3 seperti ini:
+
+```powershell
+$headers = @{ 'X-Simulator-Key' = 'isi-dengan-SIMULATOR_API_KEY-di-env' }
+$body = @{ amount = 15000; idempotencyKey = [guid]::NewGuid().ToString() } | ConvertTo-Json
+$result = Invoke-RestMethod -Method Post -Uri 'http://localhost:8787/dev/simulate-payment' -Headers $headers -ContentType 'application/json' -Body $body
+$result.tts
+Invoke-WebRequest -Uri "http://localhost:8787$($result.tts.audioUrl)" -Headers $headers -OutFile '.\data\simulation-payment.mp3'
+Start-Process '.\data\simulation-payment.mp3'
+```
+
+Tiap simulasi baru yang berhasil memakai kuota gratis TTS berdasarkan jumlah karakter. Jika `tts.status` bernilai `not_configured`, isi API key dan mulai ulang server. Jika bernilai `failed` atau `not_generated`, periksa koneksi atau kuota TTS. Audio simulasi tidak menandakan pembayaran nyata.
+
 ## Coba TTS cloud Bahasa Indonesia dari PowerShell
 
 Daftar di [SonexLabs](https://docs.sonexlabs.com/text-to-speech/indonesian), ambil API key, isi `SONEXLABS_API_KEY` di `.env`, lalu mulai ulang server. Request ini mengirim teks ke API cloud SonexLabs dan menyimpan hasil MP3 ke `data/tts-preview.mp3`:
@@ -71,7 +84,7 @@ Invoke-WebRequest -Method Post -Uri 'http://localhost:8787/dev/tts-preview' -Hea
 Start-Process '.\data\tts-preview.mp3'
 ```
 
-Endpoint hanya tersedia saat `SIMULATOR_ENABLED=true` dan `NODE_ENV` bukan `production`, serta memerlukan `X-Simulator-Key`. Teks dibatasi 4096 karakter per permintaan. Simulasi pembayaran tidak otomatis memakai TTS sehingga penggunaan hanya terjadi saat endpoint pratinjau dipanggil. Paket gratis SonexLabs saat ini memberi 10.000 karakter; harga setelah batas tersebut tercantum pada [dokumentasi penyedia](https://docs.sonexlabs.com/pricing). Jangan tambahkan metode pembayaran jika ingin tetap tanpa billing. MP3 pratinjau lokal diabaikan oleh Git.
+Endpoint pratinjau hanya tersedia saat `SIMULATOR_ENABLED=true` dan `NODE_ENV` bukan `production`, serta memerlukan `X-Simulator-Key`. Teks dibatasi 4096 karakter per permintaan. Paket gratis SonexLabs saat ini memberi 10.000 karakter; harga setelah batas tersebut tercantum pada [dokumentasi penyedia](https://docs.sonexlabs.com/pricing). Jangan tambahkan metode pembayaran jika ingin tetap tanpa billing. Berkas MP3 di folder `data/` diabaikan oleh Git.
 
 ## API untuk ESP32
 
@@ -83,6 +96,7 @@ Semua panggilan perangkat memakai header `X-Device-Key: <DEVICE_API_KEY>`.
 | `GET /api/events?limit=10` | Mengambil event belum diakui, paling banyak 50 per poll. |
 | `POST /api/events/{id}/ack` | Mengakui event yang sudah diterima/ditangani ESP32. |
 | `POST /dev/simulate-payment` | Membuat event non-produksi; butuh header `X-Simulator-Key` dengan `SIMULATOR_API_KEY`. |
+| `GET /dev/simulate-payment/{id}/audio` | Mengunduh ucapan MP3 untuk event simulasi; butuh `X-Simulator-Key`. |
 | `POST /webhooks/midtrans` | Endpoint integrasi terpisah, mati secara default. |
 
 Event tetap muncul saat polling sampai ESP32 mengakui ID-nya. Pengiriman bersifat *at least once*: jika ESP32 kehilangan respons, ID yang sama dapat muncul lagi. Simpan ID yang sedang diproses pada perangkat agar event yang sama tidak diputar dua kali. Akui sesudah perangkat berhasil menangani event sesuai kebijakan perangkat.
@@ -133,6 +147,7 @@ Untuk setup Midtrans, format signature dan status pembayaran mengikuti [dokument
 | `SIMULATOR_ENABLED` | `false` | Harus `true` untuk endpoint development. |
 | `SIMULATOR_API_KEY` | wajib saat simulator aktif | Kunci khusus endpoint simulasi. |
 | `SONEXLABS_API_KEY` | kosong | Opsional; diperlukan untuk pratinjau TTS cloud. Simpan hanya di `.env` dan jangan commit. |
+| `SONEXLABS_VOICE_ID` | kosong | Opsional; ID suara SonexLabs yang digunakan untuk pratinjau dan simulasi TTS. |
 | `MIDTRANS_WEBHOOK_ENABLED` | `false` | Harus tetap mati sampai GoPay Static QRIS disetujui. |
 | `MIDTRANS_SERVER_KEY` | kosong | Simpan hanya secara lokal setelah tersedia. |
 | `MIDTRANS_ALLOWED_PAYMENT_TYPE` | kosong | Nilai harus dikonfirmasi sebelum webhook diaktifkan. |
