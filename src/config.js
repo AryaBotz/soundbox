@@ -59,6 +59,7 @@ export function readConfig() {
     deviceApiKey,
     simulatorApiKey,
     simulatorEnabled: bool('SIMULATOR_ENABLED', false),
+    sonexLabsApiKey: process.env.SONEXLABS_API_KEY ?? '',
     midtransWebhookEnabled,
     midtransServerKey,
     midtransAllowedPaymentType

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.js';
 import { EventStore } from './store.js';
 import { isApprovedPaidNotification, toMidtransEvent, verifyMidtransSignature } from './integrations/midtrans.js';
+import { createSonexSpeech } from './integrations/sonex-tts.js';
 
 const BODY_LIMIT = 16 * 1024;
 
@@ -15,6 +16,16 @@ function sendJson(response, statusCode, body) {
     'x-content-type-options': 'nosniff'
   });
   response.end(JSON.stringify(body));
+}
+
+function sendAudio(response, audio) {
+  response.writeHead(200, {
+    'content-type': 'audio/mpeg',
+    'content-length': audio.length,
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff'
+  });
+  response.end(audio);
 }
 
 async function readJson(request) {
@@ -69,7 +80,7 @@ function validateSimulation(body) {
   return null;
 }
 
-export async function handleRequest(request, response, { config, store }) {
+export async function handleRequest(request, response, { config, store, synthesizeSpeech }) {
   try {
     const url = new URL(request.url, 'http://localhost');
     if (request.method === 'GET' && url.pathname === '/health') {
@@ -138,6 +149,25 @@ export async function handleRequest(request, response, { config, store }) {
       });
     }
 
+    if (request.method === 'POST' && url.pathname === '/dev/tts-preview') {
+      if (!config.simulatorEnabled || config.nodeEnv === 'production') {
+        return sendJson(response, 404, { error: 'not_found' });
+      }
+      if (!requireKey(request, response, config.simulatorApiKey, 'x-simulator-key')) return;
+      if (!config.sonexLabsApiKey) {
+        return sendJson(response, 503, { error: 'tts_not_configured', message: 'Set SONEXLABS_API_KEY in the local .env file to enable cloud TTS.' });
+      }
+      const body = await readJson(request);
+      if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 4096) {
+        return sendJson(response, 400, { error: 'invalid_request', message: 'text must contain 1 to 4096 characters' });
+      }
+      if (typeof synthesizeSpeech !== 'function') {
+        return sendJson(response, 503, { error: 'tts_unavailable', message: 'Cloud TTS is unavailable.' });
+      }
+      const audio = await synthesizeSpeech(body.text.trim());
+      return sendAudio(response, audio);
+    }
+
     if (request.method === 'POST' && url.pathname === '/webhooks/midtrans') {
       if (!config.midtransWebhookEnabled) {
         return sendJson(response, 503, { error: 'webhook_disabled', message: 'Midtrans webhook is disabled pending payment-method approval and configuration' });
@@ -173,9 +203,11 @@ export async function handleRequest(request, response, { config, store }) {
   }
 }
 
-export function createServer({ config, store }) {
+export function createServer({ config, store, synthesizeSpeech = createSonexSpeech({
+  apiKey: config.sonexLabsApiKey
+}) }) {
   return http.createServer((request, response) => {
-    void handleRequest(request, response, { config, store });
+    void handleRequest(request, response, { config, store, synthesizeSpeech });
   });
 }
 
@@ -188,6 +220,7 @@ async function main() {
     console.log(`QRIS Soundbox backend listening on http://${config.host}:${config.port}`);
     console.log(`Simulator: ${config.simulatorEnabled && config.nodeEnv !== 'production' ? 'enabled (unverified development events only)' : 'disabled'}`);
     console.log(`Midtrans webhook: ${config.midtransWebhookEnabled ? `enabled for payment_type=${config.midtransAllowedPaymentType}` : 'disabled'}`);
+    console.log(`Cloud TTS preview: ${config.sonexLabsApiKey ? 'configured (explicit requests only)' : 'not configured'}`);
   });
 }
 

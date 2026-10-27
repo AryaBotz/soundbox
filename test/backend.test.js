@@ -22,6 +22,7 @@ async function setup(t, overrides = {}) {
     deviceApiKey: DEVICE_KEY,
     simulatorApiKey: SIMULATOR_KEY,
     simulatorEnabled: true,
+    sonexLabsApiKey: '',
     midtransWebhookEnabled: false,
     midtransServerKey: '',
     midtransAllowedPaymentType: '',
@@ -30,7 +31,7 @@ async function setup(t, overrides = {}) {
   t.after(async () => {
     await fs.rm(directory, { recursive: true, force: true });
   });
-  const invoke = async (url, { method = 'GET', key, headerName = 'x-device-key', body } = {}) => {
+  const invoke = async (url, { method = 'GET', key, headerName = 'x-device-key', body, synthesizeSpeech } = {}) => {
     const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
     request.method = method;
     request.url = url;
@@ -41,13 +42,19 @@ async function setup(t, overrides = {}) {
     const response = {
       status: null,
       headersSent: false,
+      headers: {},
       body: '',
-      writeHead(status) { this.status = status; this.headersSent = true; },
+      writeHead(status, headers = {}) { this.status = status; this.headers = headers; this.headersSent = true; },
       end(value) { this.body = value ?? ''; },
       destroy() { this.destroyed = true; }
     };
-    await handleRequest(request, response, { config, store });
-    return { status: response.status, json: async () => JSON.parse(response.body) };
+    await handleRequest(request, response, { config, store, synthesizeSpeech });
+    return {
+      status: response.status,
+      headers: response.headers,
+      audio: response.body,
+      json: async () => JSON.parse(response.body)
+    };
   };
   return { invoke, store, dataFile, config };
 }
@@ -118,6 +125,46 @@ test('simulator and device endpoints require their configured API keys', async (
   assert.equal(simulator.status, 401);
   const poll = await invoke('/api/events');
   assert.equal(poll.status, 401);
+});
+
+test('TTS preview is explicit, simulator-key protected, and returns MP3 audio', async (t) => {
+  const { invoke } = await setup(t, { sonexLabsApiKey: 'test-key' });
+  const unauthorized = await post(invoke, '/dev/tts-preview', 'wrong-key', { text: 'Uji suara.' }, 'x-simulator-key');
+  assert.equal(unauthorized.status, 401);
+
+  let spoken;
+  const preview = await invoke('/dev/tts-preview', {
+    method: 'POST', key: SIMULATOR_KEY, headerName: 'x-simulator-key', body: { text: '  Pembayaran simulasi.  ' },
+    synthesizeSpeech: async (text) => { spoken = text; return Buffer.from('fake-mp3'); }
+  });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.headers['content-type'], 'audio/mpeg');
+  assert.equal(preview.audio.toString(), 'fake-mp3');
+  assert.equal(spoken, 'Pembayaran simulasi.');
+});
+
+test('TTS preview returns a setup hint when no cloud TTS API key exists', async (t) => {
+  const { invoke } = await setup(t);
+  const response = await post(invoke, '/dev/tts-preview', SIMULATOR_KEY, { text: 'Uji suara.' }, 'x-simulator-key');
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, 'tts_not_configured');
+});
+
+test('SonexLabs TTS adapter sends Indonesian text and returns MP3 bytes', async () => {
+  const { createSonexSpeech } = await import('../src/integrations/sonex-tts.js');
+  let captured;
+  const synthesize = createSonexSpeech({
+    apiKey: 'secret-for-test',
+    fetchImpl: async (url, options) => {
+      captured = { url, options, body: JSON.parse(options.body) };
+      return { ok: true, arrayBuffer: async () => Uint8Array.from([1, 2, 3]).buffer };
+    }
+  });
+  assert.deepEqual(await synthesize('Halo.'), Buffer.from([1, 2, 3]));
+  assert.equal(captured.url, 'https://api.sonexlabs.com/v1/speech');
+  assert.equal(captured.options.headers.authorization, 'Bearer secret-for-test');
+  assert.equal(captured.body.text, 'Halo.');
+  assert.equal(captured.body.output_format, 'mp3');
 });
 
 test('deduplication and acknowledgements survive reopening the event store', async (t) => {
