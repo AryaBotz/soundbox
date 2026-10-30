@@ -5,7 +5,7 @@ compatibility_date = "2026-10-31"
 [[d1_databases]]
 binding = "DB"
 database_name = "soundbox-qris"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "e395fc82-05b9-40a3-9d45-f9af1092719e"
 migrations_dir = "cloudflare/migrations"
 
 [vars]
