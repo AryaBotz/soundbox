@@ -18,6 +18,17 @@ function authorized(request, env, header, setting) {
   return keyMatches(request.headers.get(header) ?? '', env[setting] ?? '');
 }
 
+function deviceBasicAuth(request, env) {
+  const header = request.headers.get('authorization') ?? '';
+  const match = header.match(/^Basic\s+(.+)$/i);
+  if (!match || !env.DEVICE_API_KEY) return false;
+  try {
+    return keyMatches(atob(match[1]), `device:${env.DEVICE_API_KEY}`);
+  } catch {
+    return false;
+  }
+}
+
 async function readBody(request) {
   if (!(request.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) return { error: 'Content-Type must be application/json', status: 415 };
   const text = await request.text();
@@ -90,6 +101,14 @@ export async function onRequest(request, env) {
       const limit = Number.isInteger(raw) ? Math.min(50, Math.max(1, raw)) : 10;
       const { results } = await db.prepare('SELECT id, dedupe_key, event_json, acknowledged_at FROM events WHERE acknowledged_at IS NULL ORDER BY created_at LIMIT ?').bind(limit).all();
       return json({ events: results.map(eventFromRow), pollAfterMs: 2000, notice: 'Events may repeat until acknowledged. Deduplicate on the ESP32 by event id.' });
+    }
+    const deviceAudio = request.method === 'GET' && url.pathname.match(/^\/api\/events\/([0-9a-f-]{36})\/audio$/i);
+    if (deviceAudio) {
+      if (!deviceBasicAuth(request, env)) return json({ error: 'unauthorized' }, 401);
+      const row = await db.prepare('SELECT event_json, audio FROM events WHERE id = ?').bind(deviceAudio[1]).first();
+      if (!row || !JSON.parse(row.event_json).isSimulated) return json({ error: 'simulated_event_not_found' }, 404);
+      if (!row.audio) return json({ error: 'audio_not_ready', message: 'TTS audio is not available for this event.' }, 404);
+      return new Response(row.audio, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
     }
     const ack = request.method === 'POST' && url.pathname.match(/^\/api\/events\/([^/]+)\/ack$/);
     if (ack) {

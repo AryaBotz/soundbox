@@ -30,6 +30,7 @@ class MemoryD1 {
       async first() {
         if (sql.includes('COUNT(*)')) return { total: db.rows.length, pending: db.rows.filter((r) => !r.acknowledged_at).length };
         if (sql.includes('WHERE dedupe_key')) return db.rows.find((r) => r.dedupe_key === args[0]) ?? null;
+        if (sql.includes('event_json, audio')) return db.rows.find((r) => r.id === args[0]) ?? null;
         if (sql.includes('WHERE id')) return db.rows.find((r) => r.id === args[0]) ?? null;
         throw new Error(`Unhandled SQL first: ${sql}`);
       },
@@ -76,4 +77,20 @@ test('Cloudflare worker rejects missing keys and leaves Midtrans disabled', asyn
   assert.equal((await onRequest(request('/api/events'), env)).status, 401);
   assert.equal((await onRequest(request('/dev/simulate-payment', { method: 'POST', body: { amount: 100 } }), env)).status, 401);
   assert.equal((await onRequest(request('/webhooks/midtrans', { method: 'POST', body: {} }), env)).status, 503);
+});
+
+test('device Basic auth can retrieve audio for a simulated event only', async () => {
+  const env = { DB: new MemoryD1(), SIMULATOR_ENABLED: 'true', SIMULATOR_API_KEY: 'sim-key', DEVICE_API_KEY: 'device-key', MIDTRANS_WEBHOOK_ENABLED: 'false' };
+  const created = await onRequest(request('/dev/simulate-payment', { method: 'POST', headers: { 'x-simulator-key': 'sim-key' }, body: { amount: 5000, idempotencyKey: 'audio-test' } }), env);
+  const event = (await created.json()).event;
+  const row = env.DB.rows.find((r) => r.id === event.id);
+  row.audio = new Uint8Array([0x49, 0x44, 0x33]);
+
+  const unauthorized = await onRequest(request(`/api/events/${event.id}/audio`), env);
+  assert.equal(unauthorized.status, 401);
+  const auth = `Basic ${btoa('device:device-key')}`;
+  const audio = await onRequest(request(`/api/events/${event.id}/audio`, { headers: { authorization: auth } }), env);
+  assert.equal(audio.status, 200);
+  assert.equal(audio.headers.get('content-type'), 'audio/mpeg');
+  assert.deepEqual([...new Uint8Array(await audio.arrayBuffer())], [0x49, 0x44, 0x33]);
 });
