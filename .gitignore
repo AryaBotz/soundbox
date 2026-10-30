@@ -4,3 +4,4 @@ data/*.tmp
 data/*.mp3
 data/**/*.mp3
 node_modules/
+firmware/esp32_cloud_poll_test/secrets.h

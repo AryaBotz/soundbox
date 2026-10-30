@@ -2,11 +2,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-
-// Isi lokal di Arduino IDE. Jangan commit SSID, password, atau API key asli.
-const char* WIFI_SSID = "ISI_NAMA_WIFI_2_4_GHZ";
-const char* WIFI_PASSWORD = "ISI_PASSWORD_WIFI";
-const char* DEVICE_API_KEY = "ISI_DEVICE_API_KEY";
+#include "secrets.h"
 
 const char* EVENTS_URL = "https://soundbox-qris-backend.aryahakim678.workers.dev/api/events?limit=10";
 const char* ACK_URL_PREFIX = "https://soundbox-qris-backend.aryahakim678.workers.dev/api/events/";
