@@ -1,0 +1,13 @@
+name = "soundbox-qris-backend"
+main = "cloudflare/worker.js"
+compatibility_date = "2026-10-31"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "soundbox-qris"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "cloudflare/migrations"
+
+[vars]
+SIMULATOR_ENABLED = "true"
+MIDTRANS_WEBHOOK_ENABLED = "false"

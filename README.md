@@ -1,5 +1,9 @@
 # QRIS Soundbox backend
 
+## Deploy cloud tanpa laptop
+
+Versi Cloudflare Workers + D1 sudah disiapkan supaya API bisa diakses ESP32 lewat HTTPS saat laptop mati. Ikuti [panduan deploy Cloudflare](cloudflare/README.md). Ini versi cloud terpisah dari server Node.js lokal di bawah. Jangan mengaktifkan webhook Midtrans sebelum metode GoPay Static QRIS disetujui.
+
 Backend awal untuk development QRIS Soundbox. Backend dapat membuat pratinjau TTS cloud dari PowerShell dan otomatis menghasilkan ucapan untuk setiap pembayaran simulasi. Integrasi ESP32 dan MAX98357A I2S menyusul. Backend ini tidak membuat QRIS dan tidak menganggap pembayaran simulasi sebagai pembayaran nyata.
 
 ## Kebutuhan
