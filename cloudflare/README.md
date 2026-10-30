@@ -20,9 +20,19 @@ This is a cloud-hosted version of the Node backend. It uses Cloudflare D1 for th
    npx wrangler d1 migrations apply soundbox-qris --remote
    ```
 
-## 2. Add secrets and deploy
+## 2. Create the Worker
 
-Make two long, random keys (one for ESP32, one for the development simulator). Never reuse or publish the values. Set them without placing secrets in the repository:
+The D1 schema was applied in step 1. Create the Worker once:
+
+```powershell
+npx wrangler deploy
+```
+
+This first deployment creates the service. Protected endpoints will not work until the keys are added in the next step.
+
+## 3. Add secrets
+
+Make two long, random keys (one for ESP32, one for the development simulator). Never reuse or publish the values. Enter each value when Wrangler prompts; secrets are not stored in this repository:
 
 ```powershell
 npx wrangler secret put DEVICE_API_KEY
@@ -36,17 +46,15 @@ npx wrangler secret put SONEXLABS_API_KEY
 npx wrangler secret put SONEXLABS_VOICE_ID
 ```
 
-`SONEXLABS_VOICE_ID` may be left unset if the provider default is desired. Midtrans stays disabled. Do not set Midtrans secrets until GoPay Static QRIS has been approved and its payment type confirmed.
+`SONEXLABS_API_KEY` and `SONEXLABS_VOICE_ID` are optional. `SONEXLABS_VOICE_ID` may be left unset if the provider default is desired. Midtrans stays disabled. Do not set Midtrans secrets until GoPay Static QRIS has been approved and its payment type confirmed.
 
-Deploy:
+## 4. Connect GitHub for automatic deploys
 
-```powershell
-npx wrangler deploy
-```
+In Cloudflare, open **Workers & Pages → Create application → GitHub**, authorize GitHub, and select `AryaBotz/soundbox`. Keep the Worker name `soundbox-qris-backend` and the repository root where `wrangler.toml` is located. Keep the default deploy command, `npx wrangler deploy`. Future pushes to `main` will deploy automatically.
 
-The command prints a URL like `https://soundbox-qris-backend.<account>.workers.dev`. Use that base URL for the ESP32 backend setting; do not include `:8787`.
+The first deployment prints a URL like `https://soundbox-qris-backend.<account>.workers.dev`. Use that base URL for the ESP32 backend setting; do not include `:8787`.
 
-## 3. Smoke-test the deployment
+## 5. Smoke-test the deployment
 
 ```powershell
 $base = 'https://soundbox-qris-backend.<account>.workers.dev'
