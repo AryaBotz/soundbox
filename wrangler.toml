@@ -11,3 +11,4 @@ migrations_dir = "cloudflare/migrations"
 [vars]
 SIMULATOR_ENABLED = "true"
 MIDTRANS_WEBHOOK_ENABLED = "false"
+SONEXLABS_VOICE_ID = "clone:mayzuh02or"
