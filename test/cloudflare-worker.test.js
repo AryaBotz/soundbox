@@ -113,7 +113,10 @@ test('sandbox QRIS creation calls only the GoPay Sandbox API behind the simulato
           transaction_id: 'sandbox-tx-1',
           order_id: captured.body.transaction_details.order_id,
           transaction_status: 'pending',
-          actions: [{ name: 'generate-qr-code-v2', url: 'https://api.sandbox.midtrans.com/v4/qris/test/qr-code' }]
+          actions: [
+            { name: 'generate-qr-code', url: 'https://api.sandbox.midtrans.com/v2/qris/test/qr-code' },
+            { name: 'generate-qr-code-v2', url: 'https://api.sandbox.midtrans.com/v4/qris/test/qr-code' }
+          ]
         })
       };
     }
@@ -137,7 +140,7 @@ test('sandbox QRIS creation calls only the GoPay Sandbox API behind the simulato
   const result = await response.json();
   assert.equal(result.sandbox, true);
   assert.equal(result.amount, 15000);
-  assert.equal(result.qrImageUrl, 'https://api.sandbox.midtrans.com/v4/qris/test/qr-code');
+  assert.equal(result.qrImageUrl, 'https://api.sandbox.midtrans.com/v2/qris/test/qr-code');
 });
 
 test('sandbox Midtrans settlement is labeled non-production, deduplicated by transaction, and gets TTS on device audio request', async () => {

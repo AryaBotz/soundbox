@@ -249,7 +249,9 @@ export async function onRequest(request, env) {
       const result = await response.json().catch(() => ({}));
       if (!response.ok) return json({ error: 'midtrans_sandbox_rejected', status: response.status, details: result }, 502);
       const actions = Array.isArray(result.actions) ? result.actions : [];
-      const qr = actions.find((action) => action.name === 'generate-qr-code-v2') ?? actions.find((action) => action.name === 'generate-qr-code');
+      // Prefer Midtrans's standard QR image action for simulator compatibility;
+      // use the ASPI-format action only when the standard action is absent.
+      const qr = actions.find((action) => action.name === 'generate-qr-code') ?? actions.find((action) => action.name === 'generate-qr-code-v2');
       if (!result.transaction_id || !qr?.url) return json({ error: 'midtrans_sandbox_invalid_response' }, 502);
       return json({ sandbox: true, paymentType: 'qris', acquirer: 'gopay', amount, orderId: result.order_id, transactionId: result.transaction_id, status: result.transaction_status, qrImageUrl: qr.url });
     }
