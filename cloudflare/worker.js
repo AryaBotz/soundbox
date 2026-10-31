@@ -261,7 +261,10 @@ export async function onRequest(request, env) {
       const parsed = await readBody(request);
       if (parsed.error) return json({ error: 'request_error', message: parsed.error }, parsed.status);
       const p = parsed.body;
-      if (!await signatureValid(p, env.MIDTRANS_SERVER_KEY)) return json({ error: 'invalid_midtrans_signature' }, 401);
+      // Newer Midtrans dashboards expose a dedicated Signature Secret Key.
+      // Keep Server Key as the legacy fallback for older merchant accounts.
+      const signatureSecret = env.MIDTRANS_SIGNATURE_SECRET || env.MIDTRANS_SERVER_KEY;
+      if (!await signatureValid(p, signatureSecret)) return json({ error: 'invalid_midtrans_signature' }, 401);
       if (p.payment_type !== env.MIDTRANS_ALLOWED_PAYMENT_TYPE || (env.MIDTRANS_ALLOWED_ACQUIRER && p.acquirer !== env.MIDTRANS_ALLOWED_ACQUIRER) || (p.currency && p.currency !== 'IDR') || !['settlement', 'capture'].includes(p.transaction_status) || (p.fraud_status !== undefined && p.fraud_status !== 'accept')) return json({ received: true, enqueued: false, reason: 'not_an_approved_successful_payment' });
       const amount = Number(p.gross_amount);
       if (!Number.isFinite(amount) || amount <= 0) return json({ error: 'invalid_gross_amount' }, 400);

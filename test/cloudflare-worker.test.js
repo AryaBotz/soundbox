@@ -145,6 +145,7 @@ test('sandbox QRIS creation calls only the GoPay Sandbox API behind the simulato
 
 test('sandbox Midtrans settlement is labeled non-production, deduplicated by transaction, and gets TTS on device audio request', async () => {
   const serverKey = 'sandbox-server-key';
+  const signatureSecret = 'sandbox-signature-secret';
   let ttsCalls = 0;
   const env = {
     DB: new MemoryD1(),
@@ -152,6 +153,7 @@ test('sandbox Midtrans settlement is labeled non-production, deduplicated by tra
     MIDTRANS_WEBHOOK_ENABLED: 'true',
     MIDTRANS_MODE: 'sandbox',
     MIDTRANS_SERVER_KEY: serverKey,
+    MIDTRANS_SIGNATURE_SECRET: signatureSecret,
     MIDTRANS_ALLOWED_PAYMENT_TYPE: 'qris',
     MIDTRANS_ALLOWED_ACQUIRER: 'gopay',
     SONEXLABS_API_KEY: 'test-tts-key',
@@ -174,7 +176,7 @@ test('sandbox Midtrans settlement is labeled non-production, deduplicated by tra
     fraud_status: 'accept'
   };
   payload.signature_key = createHash('sha512')
-    .update(`${payload.order_id}${payload.status_code}${payload.gross_amount}${serverKey}`)
+    .update(`${payload.order_id}${payload.status_code}${payload.gross_amount}${signatureSecret}`)
     .digest('hex');
 
   const notification = await onRequest(request('/webhooks/midtrans', { method: 'POST', body: payload }), env);
