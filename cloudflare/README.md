@@ -46,7 +46,11 @@ npx wrangler secret put SONEXLABS_API_KEY
 npx wrangler secret put SONEXLABS_VOICE_ID
 ```
 
-`SONEXLABS_API_KEY` and `SONEXLABS_VOICE_ID` are optional. `SONEXLABS_VOICE_ID` may be left unset if the provider default is desired. Midtrans stays disabled. Do not set Midtrans secrets until GoPay Static QRIS has been approved and its payment type confirmed.
+`SONEXLABS_API_KEY` is required for cloud speech generation. The selected voice ID is configured in `wrangler.toml`. For Midtrans sandbox testing only, add the Sandbox Server Key as `MIDTRANS_SERVER_KEY`; never use or paste a Production Server Key while `MIDTRANS_MODE` is `sandbox`.
+
+The sandbox QRIS test route is `POST /dev/midtrans-sandbox/qris`, protected by `X-Simulator-Key`. It creates a GoPay QRIS transaction only through Midtrans' Sandbox API. Complete the payment only with Midtrans' QRIS simulator, never with a real payment app. Sandbox events are clearly marked as tests and are not production-eligible.
+
+In the Midtrans Sandbox dashboard, set the Payment Notification URL to `https://<worker-host>/webhooks/midtrans`. The Worker currently accepts only `payment_type: qris`, `acquirer: gopay`, and successful settlement/capture notifications. Before production, change the environment to production, use the Production Server Key, confirm the allowed method with Midtrans, and disable the development simulator and sandbox QR route.
 
 ## 4. Connect GitHub for automatic deploys
 

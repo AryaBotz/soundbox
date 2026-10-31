@@ -10,5 +10,8 @@ migrations_dir = "cloudflare/migrations"
 
 [vars]
 SIMULATOR_ENABLED = "true"
-MIDTRANS_WEBHOOK_ENABLED = "false"
+MIDTRANS_WEBHOOK_ENABLED = "true"
+MIDTRANS_MODE = "sandbox"
+MIDTRANS_ALLOWED_PAYMENT_TYPE = "qris"
+MIDTRANS_ALLOWED_ACQUIRER = "gopay"
 SONEXLABS_VOICE_ID = "clone:mayzuh02or"

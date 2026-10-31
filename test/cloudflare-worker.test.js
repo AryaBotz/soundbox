@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { onRequest } from '../cloudflare/worker.js';
 
 class MemoryD1 {
@@ -93,4 +94,106 @@ test('device Basic auth can retrieve audio for a simulated event only', async ()
   assert.equal(audio.status, 200);
   assert.equal(audio.headers.get('content-type'), 'audio/mpeg');
   assert.deepEqual([...new Uint8Array(await audio.arrayBuffer())], [0x49, 0x44, 0x33]);
+});
+
+test('sandbox QRIS creation calls only the GoPay Sandbox API behind the simulator key', async () => {
+  let captured;
+  const env = {
+    DB: new MemoryD1(),
+    SIMULATOR_ENABLED: 'true',
+    SIMULATOR_API_KEY: 'sim-key',
+    MIDTRANS_MODE: 'sandbox',
+    MIDTRANS_SERVER_KEY: 'sandbox-server-key',
+    MIDTRANS_FETCH: async (url, options) => {
+      captured = { url, options, body: JSON.parse(options.body) };
+      return {
+        ok: true,
+        status: 201,
+        json: async () => ({
+          transaction_id: 'sandbox-tx-1',
+          order_id: captured.body.transaction_details.order_id,
+          transaction_status: 'pending',
+          actions: [{ name: 'generate-qr-code-v2', url: 'https://api.sandbox.midtrans.com/v4/qris/test/qr-code' }]
+        })
+      };
+    }
+  };
+
+  const unauthorized = await onRequest(request('/dev/midtrans-sandbox/qris', {
+    method: 'POST', body: { amount: 15000 }
+  }), env);
+  assert.equal(unauthorized.status, 401);
+
+  const response = await onRequest(request('/dev/midtrans-sandbox/qris', {
+    method: 'POST',
+    headers: { 'x-simulator-key': 'sim-key' },
+    body: { amount: 15000 }
+  }), env);
+  assert.equal(response.status, 200);
+  assert.equal(captured.url, 'https://api.sandbox.midtrans.com/v2/charge');
+  assert.equal(captured.options.headers.authorization, `Basic ${btoa('sandbox-server-key:')}`);
+  assert.equal(captured.body.payment_type, 'qris');
+  assert.deepEqual(captured.body.qris, { acquirer: 'gopay' });
+  const result = await response.json();
+  assert.equal(result.sandbox, true);
+  assert.equal(result.amount, 15000);
+  assert.equal(result.qrImageUrl, 'https://api.sandbox.midtrans.com/v4/qris/test/qr-code');
+});
+
+test('sandbox Midtrans settlement is labeled non-production, deduplicated by transaction, and gets TTS on device audio request', async () => {
+  const serverKey = 'sandbox-server-key';
+  let ttsCalls = 0;
+  const env = {
+    DB: new MemoryD1(),
+    DEVICE_API_KEY: 'device-key',
+    MIDTRANS_WEBHOOK_ENABLED: 'true',
+    MIDTRANS_MODE: 'sandbox',
+    MIDTRANS_SERVER_KEY: serverKey,
+    MIDTRANS_ALLOWED_PAYMENT_TYPE: 'qris',
+    MIDTRANS_ALLOWED_ACQUIRER: 'gopay',
+    SONEXLABS_API_KEY: 'test-tts-key',
+    SONEXLABS_FETCH: async (_url, options) => {
+      ttsCalls += 1;
+      assert.match(JSON.parse(options.body).text, /UJI MIDTRANS SANDBOX/);
+      return { ok: true, headers: { get: () => null }, arrayBuffer: async () => Uint8Array.from([0x49, 0x44, 0x33]).buffer };
+    }
+  };
+
+  const payload = {
+    order_id: 'sandbox-order-1',
+    status_code: '200',
+    gross_amount: '15000.00',
+    transaction_status: 'settlement',
+    payment_type: 'qris',
+    transaction_id: 'sandbox-tx-unique-1',
+    acquirer: 'gopay',
+    currency: 'IDR',
+    fraud_status: 'accept'
+  };
+  payload.signature_key = createHash('sha512')
+    .update(`${payload.order_id}${payload.status_code}${payload.gross_amount}${serverKey}`)
+    .digest('hex');
+
+  const notification = await onRequest(request('/webhooks/midtrans', { method: 'POST', body: payload }), env);
+  const first = await notification.json();
+  assert.equal(first.sandbox, true);
+  assert.equal(first.enqueued, true);
+
+  const duplicate = await onRequest(request('/webhooks/midtrans', { method: 'POST', body: payload }), env);
+  assert.equal((await duplicate.json()).duplicate, true);
+  assert.equal(env.DB.rows.length, 1);
+
+  const stored = JSON.parse(env.DB.rows[0].event_json);
+  assert.equal(stored.isSandbox, true);
+  assert.equal(stored.isSimulated, true);
+  assert.equal(stored.isVerifiedPayment, false);
+  assert.equal(stored.productionEligible, false);
+  assert.equal(env.DB.rows[0].dedupe_key, 'midtrans:sandbox-tx-unique-1');
+
+  const auth = `Basic ${btoa('device:device-key')}`;
+  const audio = await onRequest(request(`/api/events/${first.eventId}/audio`, { headers: { authorization: auth } }), env);
+  assert.equal(audio.status, 200);
+  assert.equal(audio.headers.get('content-type'), 'audio/mpeg');
+  assert.deepEqual([...new Uint8Array(await audio.arrayBuffer())], [0x49, 0x44, 0x33]);
+  assert.equal(ttsCalls, 1);
 });

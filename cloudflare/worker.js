@@ -68,7 +68,7 @@ async function synthesize(text, env) {
   if (!env.SONEXLABS_API_KEY) return null;
   let response;
   try {
-    response = await fetch('https://api.sonexlabs.com/v1/speech', {
+    response = await (env.SONEXLABS_FETCH ?? fetch)('https://api.sonexlabs.com/v1/speech', {
       method: 'POST',
       headers: { authorization: `Bearer ${env.SONEXLABS_API_KEY}`, 'content-type': 'application/json' },
       body: JSON.stringify({ text, output_format: 'mp3', sample_rate: 16000, ...(env.SONEXLABS_VOICE_ID ? { voice_id: env.SONEXLABS_VOICE_ID } : {}) })
@@ -111,10 +111,22 @@ function audioContentType(buffer) {
   return 'audio/mpeg';
 }
 
-async function makeAudioResponse(db, id) {
-  const row = await db.prepare('SELECT audio FROM events WHERE id = ?').bind(id).first();
-  if (!row?.audio) return json({ error: 'audio_not_ready', message: 'Audio tidak tersedia. Periksa konfigurasi TTS.' }, 404);
-  const audio = audioToArrayBuffer(row.audio);
+async function makeAudioResponse(db, id, env) {
+  const row = await db.prepare('SELECT event_json, audio FROM events WHERE id = ?').bind(id).first();
+  if (!row) return json({ error: 'event_not_found' }, 404);
+  const event = JSON.parse(row.event_json);
+  if (!event.isSimulated && !event.isVerifiedPayment) return json({ error: 'event_not_verified' }, 404);
+
+  let audio = audioToArrayBuffer(row.audio);
+  if (!audio && env.SONEXLABS_API_KEY) {
+    try {
+      const bytes = await synthesize(event.spokenText, env);
+      audio = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      await db.prepare('UPDATE events SET audio = ? WHERE id = ?').bind(audio, id).run();
+    } catch {
+      return json({ error: 'audio_not_ready', message: 'TTS audio could not be generated.' }, 503);
+    }
+  }
   if (!audio) return json({ error: 'audio_not_ready', message: 'Audio tidak tersedia. Periksa konfigurasi TTS.' }, 404);
   return new Response(audio, { headers: { 'content-type': audioContentType(audio), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }
@@ -151,11 +163,8 @@ export async function onRequest(request, env) {
     if (deviceAudio) {
       if (!deviceBasicAuth(request, env)) return json({ error: 'unauthorized' }, 401);
       const row = await db.prepare('SELECT event_json, audio FROM events WHERE id = ?').bind(deviceAudio[1]).first();
-      if (!row || !JSON.parse(row.event_json).isSimulated) return json({ error: 'simulated_event_not_found' }, 404);
-      if (!row.audio) return json({ error: 'audio_not_ready', message: 'TTS audio is not available for this event.' }, 404);
-      const audio = audioToArrayBuffer(row.audio);
-      if (!audio) return json({ error: 'audio_not_ready', message: 'TTS audio is not available for this event.' }, 404);
-      return new Response(audio, { headers: { 'content-type': audioContentType(audio), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+      if (!row || (!JSON.parse(row.event_json).isSimulated && !JSON.parse(row.event_json).isVerifiedPayment)) return json({ error: 'event_not_verified' }, 404);
+      return makeAudioResponse(db, deviceAudio[1], env);
     }
     const ack = request.method === 'POST' && url.pathname.match(/^\/api\/events\/([^/]+)\/ack$/);
     if (ack) {
@@ -197,7 +206,7 @@ export async function onRequest(request, env) {
       if (!authorized(request, env, 'x-simulator-key', 'SIMULATOR_API_KEY')) return json({ error: 'unauthorized' }, 401);
       const row = await db.prepare('SELECT event_json FROM events WHERE id = ?').bind(audioMatch[1]).first();
       if (!row || !JSON.parse(row.event_json).isSimulated) return json({ error: 'simulated_event_not_found' }, 404);
-      return makeAudioResponse(db, audioMatch[1]);
+      return makeAudioResponse(db, audioMatch[1], env);
     }
     if (request.method === 'POST' && url.pathname === '/dev/tts-preview') {
       if (env.SIMULATOR_ENABLED !== 'true') return json({ error: 'not_found' }, 404);
@@ -210,6 +219,40 @@ export async function onRequest(request, env) {
       const audioBuffer = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength);
       return new Response(audioBuffer, { headers: { 'content-type': audioContentType(audioBuffer), 'cache-control': 'no-store' } });
     }
+    if (request.method === 'POST' && url.pathname === '/dev/midtrans-sandbox/qris') {
+      if (env.SIMULATOR_ENABLED !== 'true' || env.MIDTRANS_MODE !== 'sandbox') return json({ error: 'not_found' }, 404);
+      if (!authorized(request, env, 'x-simulator-key', 'SIMULATOR_API_KEY')) return json({ error: 'unauthorized' }, 401);
+      if (!env.MIDTRANS_SERVER_KEY) return json({ error: 'sandbox_server_key_not_configured' }, 503);
+      const parsed = await readBody(request);
+      if (parsed.error) return json({ error: 'request_error', message: parsed.error }, parsed.status);
+      const amount = parsed.body.amount;
+      if (!Number.isSafeInteger(amount) || amount < 1 || amount > 100_000_000) return json({ error: 'invalid_request', message: 'amount must be an integer rupiah amount from 1 to 100000000' }, 400);
+
+      let response;
+      try {
+        response = await (env.MIDTRANS_FETCH ?? fetch)('https://api.sandbox.midtrans.com/v2/charge', {
+          method: 'POST',
+          headers: {
+            authorization: `Basic ${btoa(`${env.MIDTRANS_SERVER_KEY}:`)}`,
+            'content-type': 'application/json',
+            accept: 'application/json'
+          },
+          body: JSON.stringify({
+            payment_type: 'qris',
+            transaction_details: { order_id: `sbx-${crypto.randomUUID()}`, gross_amount: amount },
+            qris: { acquirer: 'gopay' }
+          })
+        });
+      } catch {
+        return json({ error: 'midtrans_sandbox_unavailable' }, 502);
+      }
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) return json({ error: 'midtrans_sandbox_rejected', status: response.status, details: result }, 502);
+      const actions = Array.isArray(result.actions) ? result.actions : [];
+      const qr = actions.find((action) => action.name === 'generate-qr-code-v2') ?? actions.find((action) => action.name === 'generate-qr-code');
+      if (!result.transaction_id || !qr?.url) return json({ error: 'midtrans_sandbox_invalid_response' }, 502);
+      return json({ sandbox: true, paymentType: 'qris', acquirer: 'gopay', amount, orderId: result.order_id, transactionId: result.transaction_id, status: result.transaction_status, qrImageUrl: qr.url });
+    }
     if (request.method === 'POST' && url.pathname === '/webhooks/midtrans') {
       if (env.MIDTRANS_WEBHOOK_ENABLED !== 'true') return json({ error: 'webhook_disabled' }, 503);
       if (!env.MIDTRANS_SERVER_KEY || !env.MIDTRANS_ALLOWED_PAYMENT_TYPE) return json({ error: 'webhook_not_configured' }, 503);
@@ -217,12 +260,14 @@ export async function onRequest(request, env) {
       if (parsed.error) return json({ error: 'request_error', message: parsed.error }, parsed.status);
       const p = parsed.body;
       if (!await signatureValid(p, env.MIDTRANS_SERVER_KEY)) return json({ error: 'invalid_midtrans_signature' }, 401);
-      if (p.payment_type !== env.MIDTRANS_ALLOWED_PAYMENT_TYPE || (p.currency && p.currency !== 'IDR') || !['settlement', 'capture'].includes(p.transaction_status) || (p.fraud_status !== undefined && p.fraud_status !== 'accept')) return json({ received: true, enqueued: false, reason: 'not_an_approved_successful_payment' });
+      if (p.payment_type !== env.MIDTRANS_ALLOWED_PAYMENT_TYPE || (env.MIDTRANS_ALLOWED_ACQUIRER && p.acquirer !== env.MIDTRANS_ALLOWED_ACQUIRER) || (p.currency && p.currency !== 'IDR') || !['settlement', 'capture'].includes(p.transaction_status) || (p.fraud_status !== undefined && p.fraud_status !== 'accept')) return json({ received: true, enqueued: false, reason: 'not_an_approved_successful_payment' });
       const amount = Number(p.gross_amount);
       if (!Number.isFinite(amount) || amount <= 0) return json({ error: 'invalid_gross_amount' }, 400);
-      const event = { provider: 'midtrans', eventType: 'payment_confirmed', source: 'midtrans_webhook', verificationStatus: 'provider_signature_verified', isVerifiedPayment: true, isSimulated: false, productionEligible: true, paymentReference: p.order_id, transactionReference: p.transaction_id ?? null, paymentMethod: p.payment_type, amount, currency: p.currency ?? 'IDR', receivedAt: new Date().toISOString(), spokenText: `Pembayaran QRIS sebesar ${rupiahToIndonesianWords(amount)} berhasil.` };
-      const result = await enqueue(db, event, `midtrans:${event.paymentReference}`);
-      return json({ received: true, enqueued: !result.duplicate, duplicate: result.duplicate, eventId: result.event?.id ?? null });
+      if (typeof p.transaction_id !== 'string' || !p.transaction_id) return json({ error: 'invalid_transaction_id' }, 400);
+      const sandbox = env.MIDTRANS_MODE === 'sandbox';
+      const event = { provider: 'midtrans', eventType: sandbox ? 'payment_sandbox' : 'payment_confirmed', source: sandbox ? 'midtrans_sandbox_webhook' : 'midtrans_webhook', verificationStatus: sandbox ? 'sandbox_signature_verified' : 'provider_signature_verified', isVerifiedPayment: !sandbox, isSimulated: sandbox, isSandbox: sandbox, productionEligible: !sandbox, paymentReference: p.order_id, transactionReference: p.transaction_id, paymentMethod: p.payment_type, paymentAcquirer: p.acquirer ?? null, amount, currency: p.currency ?? 'IDR', receivedAt: new Date().toISOString(), spokenText: sandbox ? `UJI MIDTRANS SANDBOX, BUKAN PEMBAYARAN NYATA. ${rupiahToIndonesianWords(amount)} diterima dalam uji coba.` : `Pembayaran QRIS sebesar ${rupiahToIndonesianWords(amount)} berhasil.` };
+      const result = await enqueue(db, event, `midtrans:${p.transaction_id}`);
+      return json({ received: true, sandbox, enqueued: !result.duplicate, duplicate: result.duplicate, eventId: result.event?.id ?? null });
     }
     return json({ error: 'not_found' }, 404);
   } catch (error) {
