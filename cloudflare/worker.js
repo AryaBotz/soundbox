@@ -71,7 +71,7 @@ async function synthesize(text, env) {
     response = await fetch('https://api.sonexlabs.com/v1/speech', {
       method: 'POST',
       headers: { authorization: `Bearer ${env.SONEXLABS_API_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ text, output_format: 'mp3', ...(env.SONEXLABS_VOICE_ID ? { voice_id: env.SONEXLABS_VOICE_ID } : {}) })
+      body: JSON.stringify({ text, output_format: 'mp3', sample_rate: 16000, ...(env.SONEXLABS_VOICE_ID ? { voice_id: env.SONEXLABS_VOICE_ID } : {}) })
     });
   } catch {
     throw new Error('tts_unavailable');
@@ -81,10 +81,42 @@ async function synthesize(text, env) {
   return new Uint8Array(await response.arrayBuffer());
 }
 
+function audioToArrayBuffer(value) {
+  if (value instanceof ArrayBuffer) return value;
+  if (ArrayBuffer.isView(value)) {
+    return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+  }
+  if (Array.isArray(value)) return Uint8Array.from(value).buffer;
+  if (typeof value === 'string') {
+    // Older deployments coerced Uint8Array into comma-separated decimal text
+    // before binding it to D1. Convert those existing rows back to binary.
+    const parts = value.split(',');
+    if (parts.length > 1 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+      return Uint8Array.from(parts, Number).buffer;
+    }
+    return new TextEncoder().encode(value).buffer;
+  }
+  return null;
+}
+
+function audioContentType(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 12 &&
+      bytes[0] === 0x52 && bytes[1] === 0x49 &&
+      bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x41 &&
+      bytes[10] === 0x56 && bytes[11] === 0x45) {
+    return 'audio/wav';
+  }
+  return 'audio/mpeg';
+}
+
 async function makeAudioResponse(db, id) {
   const row = await db.prepare('SELECT audio FROM events WHERE id = ?').bind(id).first();
   if (!row?.audio) return json({ error: 'audio_not_ready', message: 'Audio tidak tersedia. Periksa konfigurasi TTS.' }, 404);
-  return new Response(row.audio, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+  const audio = audioToArrayBuffer(row.audio);
+  if (!audio) return json({ error: 'audio_not_ready', message: 'Audio tidak tersedia. Periksa konfigurasi TTS.' }, 404);
+  return new Response(audio, { headers: { 'content-type': audioContentType(audio), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }
 
 export async function onRequest(request, env) {
@@ -108,7 +140,9 @@ export async function onRequest(request, env) {
       const row = await db.prepare('SELECT event_json, audio FROM events WHERE id = ?').bind(deviceAudio[1]).first();
       if (!row || !JSON.parse(row.event_json).isSimulated) return json({ error: 'simulated_event_not_found' }, 404);
       if (!row.audio) return json({ error: 'audio_not_ready', message: 'TTS audio is not available for this event.' }, 404);
-      return new Response(row.audio, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+      const audio = audioToArrayBuffer(row.audio);
+      if (!audio) return json({ error: 'audio_not_ready', message: 'TTS audio is not available for this event.' }, 404);
+      return new Response(audio, { headers: { 'content-type': audioContentType(audio), 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
     }
     const ack = request.method === 'POST' && url.pathname.match(/^\/api\/events\/([^/]+)\/ack$/);
     if (ack) {
@@ -134,7 +168,8 @@ export async function onRequest(request, env) {
       if (!result.duplicate && env.SONEXLABS_API_KEY) {
         try {
           const audio = await synthesize(result.event.spokenText, env);
-          await db.prepare('UPDATE events SET audio = ? WHERE id = ?').bind(audio, result.event.id).run();
+          const audioBuffer = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength);
+          await db.prepare('UPDATE events SET audio = ? WHERE id = ?').bind(audioBuffer, result.event.id).run();
           ttsStatus = 'ready';
         } catch { ttsStatus = 'failed'; }
       } else if (result.duplicate && result.event) {
@@ -159,7 +194,8 @@ export async function onRequest(request, env) {
       if (parsed.error) return json({ error: 'request_error', message: parsed.error }, parsed.status);
       if (typeof parsed.body.text !== 'string' || !parsed.body.text.trim() || parsed.body.text.length > 4096) return json({ error: 'invalid_request' }, 400);
       const audio = await synthesize(parsed.body.text.trim(), env);
-      return new Response(audio, { headers: { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' } });
+      const audioBuffer = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength);
+      return new Response(audioBuffer, { headers: { 'content-type': audioContentType(audioBuffer), 'cache-control': 'no-store' } });
     }
     if (request.method === 'POST' && url.pathname === '/webhooks/midtrans') {
       if (env.MIDTRANS_WEBHOOK_ENABLED !== 'true') return json({ error: 'webhook_disabled' }, 503);
