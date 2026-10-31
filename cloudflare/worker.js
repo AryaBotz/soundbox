@@ -131,7 +131,20 @@ export async function onRequest(request, env) {
       if (!authorized(request, env, 'x-device-key', 'DEVICE_API_KEY')) return json({ error: 'unauthorized' }, 401);
       const raw = Number(url.searchParams.get('limit') ?? 10);
       const limit = Number.isInteger(raw) ? Math.min(50, Math.max(1, raw)) : 10;
-      const { results } = await db.prepare('SELECT id, dedupe_key, event_json, acknowledged_at FROM events WHERE acknowledged_at IS NULL ORDER BY created_at LIMIT ?').bind(limit).all();
+      // Keep only the newest pending events, then return that window oldest-first.
+      // The ESP32 scans the list from the end to select the newest event first.
+      const { results } = await db.prepare(`
+        SELECT id, dedupe_key, event_json, acknowledged_at
+        FROM events
+        WHERE acknowledged_at IS NULL
+          AND id IN (
+            SELECT id FROM events
+            WHERE acknowledged_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+          )
+        ORDER BY created_at
+      `).bind(limit).all();
       return json({ events: results.map(eventFromRow), pollAfterMs: 2000, notice: 'Events may repeat until acknowledged. Deduplicate on the ESP32 by event id.' });
     }
     const deviceAudio = request.method === 'GET' && url.pathname.match(/^\/api\/events\/([0-9a-f-]{36})\/audio$/i);
